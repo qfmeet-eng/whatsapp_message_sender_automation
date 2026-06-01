@@ -1,0 +1,19 @@
+install libraries :-
+
+import pyautogui
+import time
+import os
+import pandas as pd
+import tkinter as tk
+from tkinter import filedialog, simpledialog
+import re
+import pyperclip
+
+
+step 1 :- how to run ?
+py namechange.py
+
+step 2 :- import excel sheet file or folder 
+
+and in terminal ask what remove remove space and 
+dash add all file name change

@@ -1,0 +1,105 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>WhatsApp Bulk Sender</title>
+    <link rel="stylesheet" href="{% static 'sender/styles.css' %}">
+</head>
+<body>
+    <main class="app-shell">
+        <header class="topbar">
+            <div>
+                <h1>WhatsApp Bulk Sender</h1>
+                <div class="status-line">
+                    <span id="status-dot" class="status-dot idle"></span>
+                    <span id="status-text">Ready</span>
+                </div>
+            </div>
+        </header>
+
+        <section class="metrics" aria-label="Run status">
+            <div class="metric">
+                <span class="metric-label">Processed</span>
+                <strong id="processed-count">0</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-label">Sent</span>
+                <strong id="sent-count">0</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-label">Inactive</span>
+                <strong id="inactive-count">0</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-label">Failed</span>
+                <strong id="failed-count">0</strong>
+            </div>
+        </section>
+
+        <div class="workspace">
+            <form
+                id="sender-form"
+                class="panel control-panel"
+                data-start-url="{% url 'sender:start' %}"
+                data-stop-url="{% url 'sender:stop' %}"
+                data-status-url="{% url 'sender:status' %}"
+                enctype="multipart/form-data"
+            >
+                {% csrf_token %}
+                <section class="form-section">
+                    <h2>Message</h2>
+                    <textarea id="message" name="message" rows="8" required></textarea>
+                </section>
+
+                <section class="form-section two-column">
+                    <label>
+                        <span>Excel file</span>
+                        <input id="excel-file" name="excel_file" type="file" accept=".xlsx,.xls" required>
+                    </label>
+                    <label>
+                        <span>Image file</span>
+                        <input id="image-file" name="image_file" type="file" accept=".jpg,.jpeg,.png,.bmp" required>
+                    </label>
+                </section>
+
+                <section class="form-section two-column">
+                    <label>
+                        <span>Max messages</span>
+                        <input name="max_messages" type="number" min="1" value="{{ default_max_messages }}" required>
+                    </label>
+                    <label>
+                        <span>Tick timeout seconds</span>
+                        <input name="tick_timeout" type="number" min="0" value="{{ default_tick_timeout }}" required>
+                    </label>
+                </section>
+
+                <section class="form-actions">
+                    <button id="start-button" class="primary-button" type="submit">Start</button>
+                    <button id="stop-button" class="secondary-button" type="button" disabled>Stop</button>
+                </section>
+
+                <section id="message-bar" class="message-bar" hidden></section>
+            </form>
+
+            <aside class="panel run-panel">
+                <section class="reports">
+                    <h2>Reports</h2>
+                    <div class="report-list">
+                        <a id="inactive-report" class="report-link disabled" href="#" aria-disabled="true">Inactive numbers</a>
+                        <a id="failed-report" class="report-link disabled" href="#" aria-disabled="true">Failed report</a>
+                    </div>
+                </section>
+
+                <section class="log-section">
+                    <h2>Live log</h2>
+                    <pre id="log-output" class="log-output"></pre>
+                </section>
+            </aside>
+        </div>
+    </main>
+
+    <script src="{% static 'sender/app.js' %}"></script>
+</body>
+</html>
