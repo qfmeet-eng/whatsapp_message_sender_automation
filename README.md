@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # WhatsApp Bulk Sender Web UI
 
 Aa project local computer par browser ma web UI open kari WhatsApp Desktop thi bulk message + image send karva mate che.
@@ -136,3 +137,6 @@ py -m pip install -r requirements.txt
 ### Port already in use
 
 `py namechange.py` auto next port choose karse. Terminal ma printed URL open karo.
+=======
+# whatsapp_message_sender_automation
+>>>>>>> a588bbe136979146399b8b1e61a0ff8ddba26ddd
