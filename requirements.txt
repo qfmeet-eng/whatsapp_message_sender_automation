@@ -4,3 +4,4 @@ pandas>=2.0
 PyAutoGUI>=0.9
 pyperclip>=1.9
 pywinauto>=0.6
+Pillow>=10.0

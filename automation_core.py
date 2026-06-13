@@ -48,6 +48,21 @@ CHAT_READY_PHRASES = (
     "compose a message",
 )
 
+WHATSAPP_LOGIN_PHRASES = (
+    "get started",
+    "scan the qr code",
+    "link with phone number",
+    "to set up whatsapp",
+    "open whatsapp on your phone",
+    "point your phone to this screen",
+    "link a device",
+    "loading your chats",
+    "organizing messages",
+    "connecting",
+    "tap menu",
+    "tap settings",
+)
+
 DELIVERY_STATUS_WORDS = ("sent", "delivered", "read")
 SENDING_STATUS_PHRASES = ("sending", "waiting for this message", "retry")
 
@@ -217,6 +232,70 @@ def wait_for_chat_ready_or_missing(phone, stop_event, log):
     return "missing", f"Chat did not open for {phone}"
 
 
+def wait_for_whatsapp_login(stop_event, log):
+    if Desktop is None:
+        log("UI check dependency missing. Cannot verify WhatsApp login status.")
+        return True
+
+    log("Checking if WhatsApp is logged in and ready...")
+
+    # We will check for up to 10 seconds to see if the window opens
+    window_found = False
+    for _ in range(5):
+        if stop_event.is_set():
+            return False
+        if whatsapp_window() is not None:
+            window_found = True
+            break
+        safe_sleep(2, stop_event)
+
+    # If not running, attempt to open it
+    if not window_found:
+        log("WhatsApp not detected. Opening WhatsApp Desktop...")
+        try:
+            os.startfile("whatsapp:")
+            safe_sleep(5, stop_event)
+        except Exception as exc:
+            log(f"Could not open WhatsApp: {exc}")
+            return True
+
+    # Now verify login status
+    login_detected = False
+    while True:
+        if stop_event.is_set():
+            return False
+
+        window = whatsapp_window()
+        if window is None:
+            log("WhatsApp was closed. Reopening...")
+            try:
+                os.startfile("whatsapp:")
+            except Exception:
+                pass
+            safe_sleep(5, stop_event)
+            continue
+
+        texts = read_whatsapp_texts()
+        is_login_page = has_phrase(texts, WHATSAPP_LOGIN_PHRASES)
+
+        if is_login_page:
+            if not login_detected:
+                log("WhatsApp QR Code / Login page detected! Please scan the QR code to log in. Waiting...")
+                login_detected = True
+            safe_sleep(3, stop_event)
+            continue
+
+        if login_detected:
+            log("Login completed! WhatsApp is now ready.")
+            safe_sleep(3, stop_event)
+            break
+        else:
+            log("WhatsApp is logged in and ready.")
+            break
+
+    return True
+
+
 def wait_for_delivery_tick(baseline_status_count, timeout_seconds, stop_event, log):
     if Desktop is None:
         log("Tick check dependency missing. Waiting with old delay.")
@@ -235,21 +314,23 @@ def wait_for_delivery_tick(baseline_status_count, timeout_seconds, stop_event, l
         statuses = delivery_statuses(texts)
         elapsed = time.time() - start_time
 
-        if len(statuses) > baseline_status_count:
-            return statuses[-1]
-
-        if has_sending_status(texts):
+        is_currently_sending = has_sending_status(texts)
+        if is_currently_sending:
             saw_sending = True
 
-        if saw_sending and statuses:
+        # 1. If we see that the status count has increased and it is not currently sending, it is sent
+        if len(statuses) > baseline_status_count and not is_currently_sending:
             return statuses[-1]
 
-        # Some WhatsApp Desktop versions expose only the latest status, not all
-        # messages. In that case the count may not increase, so accept a visible
-        # Sent/Delivered/Read status after a short grace period.
-        if statuses and elapsed >= TICK_FALLBACK_CONFIRM_SECONDS:
+        # 2. If we saw it sending, and now it finished sending (sending status is gone)
+        if saw_sending and not is_currently_sending and statuses:
             return statuses[-1]
 
+        # 3. Fallback: if a reasonable time has passed, no active sending is visible, and we have a status, accept it
+        if statuses and elapsed >= TICK_FALLBACK_CONFIRM_SECONDS and not is_currently_sending:
+            return statuses[-1]
+
+        # 4. Timeout limit reached (if configured by user)
         if timeout_seconds and elapsed >= timeout_seconds:
             return None
 
@@ -261,12 +342,30 @@ def wait_for_delivery_tick(baseline_status_count, timeout_seconds, stop_event, l
 
 
 def copy_image(image_file, stop_event):
-    os.startfile(image_file)
-    safe_sleep(2, stop_event)
-    pyautogui.hotkey("ctrl", "c")
-    safe_sleep(1, stop_event)
-    pyautogui.hotkey("alt", "f4")
-    safe_sleep(1, stop_event)
+    try:
+        from PIL import Image
+        import win32clipboard
+        from io import BytesIO
+
+        image = Image.open(image_file)
+        output = BytesIO()
+        image.convert("RGB").save(output, "BMP")
+        data = output.getvalue()[14:]
+        output.close()
+
+        win32clipboard.OpenClipboard()
+        win32clipboard.EmptyClipboard()
+        win32clipboard.SetClipboardData(win32clipboard.CF_DIB, data)
+        win32clipboard.CloseClipboard()
+        safe_sleep(1, stop_event)
+    except Exception as e:
+        # Fallback to visual Copy/Paste via Default Photos App if PIL/win32clipboard is missing
+        os.startfile(image_file)
+        safe_sleep(2, stop_event)
+        pyautogui.hotkey("ctrl", "c")
+        safe_sleep(1, stop_event)
+        pyautogui.hotkey("alt", "f4")
+        safe_sleep(1, stop_event)
 
 
 def close_whatsapp(stop_event=None):
@@ -318,6 +417,9 @@ def run_automation(settings, stop_event, log, stats):
     clear_old_reports(settings, log)
 
     try:
+        # Check if WhatsApp is logged in before processing the Excel
+        if not wait_for_whatsapp_login(stop_event, log):
+            return
         df = pd.read_excel(settings.excel_file)
         if "phone" not in df.columns:
             log("Excel must contain phone column.")
@@ -364,24 +466,33 @@ def run_automation(settings, stop_event, log, stats):
 
             try:
                 log(f"Opening WhatsApp for {phone}...")
-                pyautogui.hotkey("win", "s")
-                safe_sleep(1, stop_event)
-                pyautogui.write("WhatsApp")
-                safe_sleep(1, stop_event)
-                pyautogui.press("enter")
-                safe_sleep(6, stop_event)
+                opened_via_protocol = False
+                try:
+                    os.startfile(f"whatsapp://send?phone={phone}")
+                    opened_via_protocol = True
+                    safe_sleep(5, stop_event)
+                except Exception as exc:
+                    log(f"Could not open via whatsapp:// protocol: {exc}. Trying manual search fallback...")
 
-                if stop_event.is_set():
-                    log("Stopped by user.")
-                    close_whatsapp(stop_event)
-                    break
+                if not opened_via_protocol:
+                    pyautogui.hotkey("win", "s")
+                    safe_sleep(1.5, stop_event)
+                    pyautogui.write("WhatsApp")
+                    safe_sleep(1.5, stop_event)
+                    pyautogui.press("enter")
+                    safe_sleep(6, stop_event)
 
-                pyautogui.hotkey("ctrl", "n")
-                safe_sleep(2, stop_event)
+                    if stop_event.is_set():
+                        log("Stopped by user.")
+                        close_whatsapp(stop_event)
+                        break
 
-                pyautogui.write(phone)
-                safe_sleep(2, stop_event)
-                pyautogui.press("enter")
+                    pyautogui.hotkey("ctrl", "n")
+                    safe_sleep(2, stop_event)
+
+                    pyautogui.write(phone)
+                    safe_sleep(2, stop_event)
+                    pyautogui.press("enter")
 
                 chat_status, chat_error = wait_for_chat_ready_or_missing(
                     phone,
