@@ -679,4 +679,21 @@ def run_automation(settings, stop_event, log, stats):
             "Inactive WhatsApp numbers report",
             log,
         )
+        if settings.failed_report_file.exists():
+            try:
+                import shutil
+                dest = SCRIPT_DIR / "whatsapp_failed_report.xlsx"
+                shutil.copy2(settings.failed_report_file, dest)
+                log(f"Latest failed report copied to workspace: {dest.name}")
+            except Exception as e:
+                log(f"Could not copy failed report to script dir: {e}")
+
+        if settings.inactive_report_file.exists():
+            try:
+                import shutil
+                dest = SCRIPT_DIR / "whatsapp_inactive_numbers.xlsx"
+                shutil.copy2(settings.inactive_report_file, dest)
+                log(f"Latest inactive report copied to workspace: {dest.name}")
+            except Exception as e:
+                log(f"Could not copy inactive report to script dir: {e}")
         log("PROCESS COMPLETED")

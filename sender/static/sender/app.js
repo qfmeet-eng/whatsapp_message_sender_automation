@@ -15,6 +15,8 @@ const counters = {
     failed: document.getElementById("failed-count"),
 };
 
+let lastCompletedRunId = null;
+
 function csrfToken() {
     return form.querySelector("[name=csrfmiddlewaretoken]").value;
 }
@@ -56,6 +58,17 @@ function renderStatus(data) {
         setStatus("Running", "running");
     } else if (data.completed) {
         setStatus("Completed", "idle");
+        if (data.run_id && data.run_id !== lastCompletedRunId) {
+            lastCompletedRunId = data.run_id;
+            if (data.reports.inactive && data.reports.inactive.exists && data.reports.inactive.url) {
+                const link = document.createElement("a");
+                link.href = data.reports.inactive.url;
+                link.download = `whatsapp_inactive_numbers_${data.run_id}.xlsx`;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            }
+        }
     } else {
         setStatus("Ready", "idle");
     }
