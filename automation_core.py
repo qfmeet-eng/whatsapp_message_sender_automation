@@ -127,7 +127,18 @@ def whatsapp_window():
         for window in desktop.windows():
             try:
                 title = normal_text(window.window_text())
-                if "whatsapp" in title and window.is_visible():
+                visible = False
+                minimized = False
+                try:
+                    visible = window.is_visible()
+                except Exception:
+                    pass
+                try:
+                    minimized = window.is_minimized()
+                except Exception:
+                    pass
+
+                if "whatsapp" in title and (visible or minimized):
                     return window
             except Exception:
                 continue
@@ -135,6 +146,25 @@ def whatsapp_window():
         return None
 
     return None
+
+
+def activate_whatsapp_window(log=None):
+    window = whatsapp_window()
+    if window is None:
+        return False
+
+    try:
+        window.set_focus()
+        return True
+    except Exception:
+        try:
+            window.restore()
+            window.set_focus()
+            return True
+        except Exception as exc:
+            if log:
+                log(f"Could not activate WhatsApp window: {exc}")
+            return False
 
 
 def read_whatsapp_texts():
@@ -275,6 +305,8 @@ def wait_for_whatsapp_login(stop_event, log):
             safe_sleep(5, stop_event)
             continue
 
+        activate_whatsapp_window(log)
+
         texts = read_whatsapp_texts()
         is_login_page = has_phrase(texts, WHATSAPP_LOGIN_PHRASES)
 
@@ -305,12 +337,25 @@ def wait_for_delivery_tick(baseline_status_count, timeout_seconds, stop_event, l
     start_time = time.time()
     last_notice = start_time
     saw_sending = False
+    consecutive_empty_checks = 0
 
     while True:
         if stop_event.is_set():
             return "stopped"
 
         texts = read_whatsapp_texts()
+        if not texts:
+            consecutive_empty_checks += 1
+        else:
+            consecutive_empty_checks = 0
+
+        # If UI scanner returns absolutely no text for 5 checks (~10s),
+        # fallback to standard delay to avoid getting stuck in infinite loop.
+        if consecutive_empty_checks >= 5:
+            log("UI scanner could not read WhatsApp text. Waiting with fallback delay...")
+            safe_sleep(WAIT_AFTER_CLOSE, stop_event)
+            return "not checked"
+
         statuses = delivery_statuses(texts)
         elapsed = time.time() - start_time
 
@@ -330,8 +375,9 @@ def wait_for_delivery_tick(baseline_status_count, timeout_seconds, stop_event, l
         if statuses and elapsed >= TICK_FALLBACK_CONFIRM_SECONDS and not is_currently_sending:
             return statuses[-1]
 
-        # 4. Timeout limit reached (if configured by user)
-        if timeout_seconds and elapsed >= timeout_seconds:
+        # 4. Timeout limit reached (user configuration or default safety timeout of 45 seconds)
+        effective_timeout = timeout_seconds if timeout_seconds > 0 else 45
+        if elapsed >= effective_timeout:
             return None
 
         if time.time() - last_notice >= 30:
@@ -343,9 +389,14 @@ def wait_for_delivery_tick(baseline_status_count, timeout_seconds, stop_event, l
 
 def copy_image(image_file, stop_event):
     try:
+        # Try native ctypes copy (doesn't require pywin32 package)
         from PIL import Image
-        import win32clipboard
         from io import BytesIO
+        from ctypes import windll, c_size_t, memmove
+
+        GHND = 0x0042
+        GMEM_SHARE = 0x2000
+        CF_DIB = 8
 
         image = Image.open(image_file)
         output = BytesIO()
@@ -353,19 +404,42 @@ def copy_image(image_file, stop_event):
         data = output.getvalue()[14:]
         output.close()
 
-        win32clipboard.OpenClipboard()
-        win32clipboard.EmptyClipboard()
-        win32clipboard.SetClipboardData(win32clipboard.CF_DIB, data)
-        win32clipboard.CloseClipboard()
+        hData = windll.kernel32.GlobalAlloc(GHND | GMEM_SHARE, len(data))
+        pData = windll.kernel32.GlobalLock(hData)
+        memmove(pData, data, len(data))
+        windll.kernel32.GlobalUnlock(hData)
+
+        if windll.user32.OpenClipboard(None):
+            windll.user32.EmptyClipboard()
+            windll.user32.SetClipboardData(CF_DIB, hData)
+            windll.user32.CloseClipboard()
         safe_sleep(1, stop_event)
     except Exception as e:
-        # Fallback to visual Copy/Paste via Default Photos App if PIL/win32clipboard is missing
-        os.startfile(image_file)
-        safe_sleep(2, stop_event)
-        pyautogui.hotkey("ctrl", "c")
-        safe_sleep(1, stop_event)
-        pyautogui.hotkey("alt", "f4")
-        safe_sleep(1, stop_event)
+        try:
+            # Fallback 1: Try with win32clipboard if pywin32 is installed
+            from PIL import Image
+            import win32clipboard
+            from io import BytesIO
+
+            image = Image.open(image_file)
+            output = BytesIO()
+            image.convert("RGB").save(output, "BMP")
+            data = output.getvalue()[14:]
+            output.close()
+
+            win32clipboard.OpenClipboard()
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardData(win32clipboard.CF_DIB, data)
+            win32clipboard.CloseClipboard()
+            safe_sleep(1, stop_event)
+        except Exception as win32_e:
+            # Fallback 2: Visual Copy/Paste via Default Photos App
+            os.startfile(image_file)
+            safe_sleep(2, stop_event)
+            pyautogui.hotkey("ctrl", "c")
+            safe_sleep(1, stop_event)
+            pyautogui.hotkey("alt", "f4")
+            safe_sleep(1, stop_event)
 
 
 def close_whatsapp(stop_event=None):
@@ -468,7 +542,7 @@ def run_automation(settings, stop_event, log, stats):
                 log(f"Opening WhatsApp for {phone}...")
                 opened_via_protocol = False
                 try:
-                    os.startfile(f"whatsapp://send?phone={phone}")
+                    os.startfile(f"whatsapp://send?phone={COUNTRY_CODE}{phone}")
                     opened_via_protocol = True
                     safe_sleep(5, stop_event)
                 except Exception as exc:
@@ -487,10 +561,13 @@ def run_automation(settings, stop_event, log, stats):
                         close_whatsapp(stop_event)
                         break
 
+                    activate_whatsapp_window(log)
+                    safe_sleep(1, stop_event)
+
                     pyautogui.hotkey("ctrl", "n")
                     safe_sleep(2, stop_event)
 
-                    pyautogui.write(phone)
+                    pyautogui.write(f"+{COUNTRY_CODE}{phone}")
                     safe_sleep(2, stop_event)
                     pyautogui.press("enter")
 
