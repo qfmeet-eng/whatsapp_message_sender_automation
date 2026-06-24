@@ -1,5 +1,6 @@
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +29,9 @@ TICK_CHECK_INTERVAL = 2
 TICK_FALLBACK_CONFIRM_SECONDS = 5
 DEFAULT_TICK_WAIT_TIMEOUT_SECONDS = 0
 DEFAULT_MAX_MESSAGES = 50
+FOCUS_RETRY_INTERVAL = 0.5
+FOCUS_RETRY_SECONDS = 5
+UI_CALL_TIMEOUT = 2.5
 
 NOT_ON_WHATSAPP_PHRASES = (
     "no results found",
@@ -46,6 +50,11 @@ CHAT_READY_PHRASES = (
     "write a message",
     "message input",
     "compose a message",
+)
+
+CAPTION_READY_PHRASES = (
+    "add a caption",
+    "caption",
 )
 
 WHATSAPP_LOGIN_PHRASES = (
@@ -118,6 +127,25 @@ def safe_sleep(seconds, stop_event=None):
     return True
 
 
+def run_with_timeout(callback, timeout_seconds, default=None):
+    result = {"value": default, "done": False}
+
+    def runner():
+        try:
+            result["value"] = callback()
+        except Exception:
+            result["value"] = default
+        finally:
+            result["done"] = True
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    thread.join(timeout_seconds)
+    if not result["done"]:
+        return default
+    return result["value"]
+
+
 def whatsapp_window():
     if Desktop is None:
         return None
@@ -167,15 +195,172 @@ def activate_whatsapp_window(log=None):
             return False
 
 
+def focus_whatsapp_input(preferred_phrases=CHAT_READY_PHRASES, log=None):
+    window = whatsapp_window()
+    if window is None:
+        if log:
+            log("WhatsApp window not found while focusing input.")
+        return False
+
+    activate_whatsapp_window(log)
+
+    try:
+        edits = []
+        descendants = run_with_timeout(
+            lambda: window.descendants(control_type="Edit"),
+            UI_CALL_TIMEOUT,
+            [],
+        )
+        if not descendants and log:
+            log("WhatsApp input scanner timed out. Trying direct bottom-click focus.")
+
+        for element in descendants:
+            try:
+                if not element.is_visible() or not element.is_enabled():
+                    continue
+                rect = element.rectangle()
+                if rect.width() <= 20 or rect.height() <= 10:
+                    continue
+                name = normal_text(element.window_text() or element.element_info.name)
+                edits.append((name, rect, element))
+            except Exception:
+                continue
+
+        for name, _, element in edits:
+            if any(phrase in name for phrase in preferred_phrases):
+                element.click_input()
+                safe_sleep(FOCUS_RETRY_INTERVAL)
+                return True
+
+        if edits:
+            _, _, element = max(edits, key=lambda item: item[1].bottom)
+            element.click_input()
+            safe_sleep(FOCUS_RETRY_INTERVAL)
+            return True
+    except Exception as exc:
+        if log:
+            log(f"Could not focus WhatsApp input with UI scanner: {exc}")
+
+    try:
+        rect = window.rectangle()
+        pyautogui.click(rect.left + (rect.width() // 2), rect.bottom - 70)
+        safe_sleep(FOCUS_RETRY_INTERVAL)
+        return True
+    except Exception as exc:
+        if log:
+            log(f"Could not focus WhatsApp input: {exc}")
+        return False
+
+
+def wait_and_focus_whatsapp_input(preferred_phrases=CHAT_READY_PHRASES, log=None, stop_event=None):
+    end_time = time.time() + FOCUS_RETRY_SECONDS
+    while time.time() < end_time:
+        if stop_event and stop_event.is_set():
+            return False
+        if focus_whatsapp_input(preferred_phrases, log):
+            return True
+        safe_sleep(FOCUS_RETRY_INTERVAL, stop_event)
+    return False
+
+
+def focus_media_caption_input(log=None):
+    window = whatsapp_window()
+    if window is None:
+        if log:
+            log("WhatsApp window not found while focusing caption input.")
+        return False
+
+    activate_whatsapp_window(log)
+
+    try:
+        caption_matches = []
+        descendants = run_with_timeout(
+            lambda: window.descendants(),
+            UI_CALL_TIMEOUT,
+            [],
+        )
+
+        for element in descendants:
+            try:
+                if not element.is_visible() or not element.is_enabled():
+                    continue
+                rect = element.rectangle()
+                if rect.width() <= 20 or rect.height() <= 10:
+                    continue
+                name = normal_text(element.window_text() or element.element_info.name)
+                if any(phrase in name for phrase in CAPTION_READY_PHRASES):
+                    caption_matches.append((rect, element))
+            except Exception:
+                continue
+
+        if caption_matches:
+            _, element = max(caption_matches, key=lambda item: item[0].bottom)
+            element.click_input()
+            safe_sleep(FOCUS_RETRY_INTERVAL)
+            return True
+    except Exception as exc:
+        if log:
+            log(f"Could not focus caption input with UI scanner: {exc}")
+
+    return False
+
+
+def wait_and_focus_media_caption_input(log=None, stop_event=None):
+    end_time = time.time() + FOCUS_RETRY_SECONDS
+    while time.time() < end_time:
+        if stop_event and stop_event.is_set():
+            return False
+        if focus_media_caption_input(log):
+            return True
+        safe_sleep(FOCUS_RETRY_INTERVAL, stop_event)
+    return False
+
+
+def paste_text_into_media_caption(message, log=None, stop_event=None):
+    pyperclip.copy(message)
+    safe_sleep(1, stop_event)
+
+    window = whatsapp_window()
+    if window is None:
+        return False
+
+    activate_whatsapp_window(log)
+
+    if wait_and_focus_media_caption_input(log, stop_event):
+        pyautogui.hotkey("ctrl", "a")
+        safe_sleep(0.1, stop_event)
+        pyautogui.hotkey("ctrl", "v")
+        safe_sleep(1, stop_event)
+        return True
+
+    try:
+        rect = window.rectangle()
+        center_x = rect.left + (rect.width() // 2)
+        for y_offset in (95, 120, 145, 170):
+            if stop_event and stop_event.is_set():
+                return False
+            pyperclip.copy(message)
+            pyautogui.click(center_x, rect.bottom - y_offset)
+            safe_sleep(0.2, stop_event)
+            pyautogui.hotkey("ctrl", "a")
+            safe_sleep(0.1, stop_event)
+            pyautogui.hotkey("ctrl", "v")
+            safe_sleep(0.6, stop_event)
+        return True
+    except Exception as exc:
+        if log:
+            log(f"Could not paste text into caption box: {exc}")
+        return False
+
+
 def read_whatsapp_texts():
     window = whatsapp_window()
     if window is None:
         return []
 
     texts = []
-    try:
-        descendants = window.descendants()
-    except Exception:
+    descendants = run_with_timeout(lambda: window.descendants(), UI_CALL_TIMEOUT, None)
+    if descendants is None:
         return texts
 
     for element in descendants:
@@ -392,7 +577,7 @@ def copy_image(image_file, stop_event):
         # Try native ctypes copy (doesn't require pywin32 package)
         from PIL import Image
         from io import BytesIO
-        from ctypes import windll, c_size_t, memmove
+        from ctypes import c_size_t, c_uint, c_void_p, windll, memmove
 
         GHND = 0x0042
         GMEM_SHARE = 0x2000
@@ -404,16 +589,38 @@ def copy_image(image_file, stop_event):
         data = output.getvalue()[14:]
         output.close()
 
+        windll.kernel32.GlobalAlloc.restype = c_void_p
+        windll.kernel32.GlobalAlloc.argtypes = [c_uint, c_size_t]
+        windll.kernel32.GlobalLock.restype = c_void_p
+        windll.kernel32.GlobalLock.argtypes = [c_void_p]
+        windll.kernel32.GlobalUnlock.argtypes = [c_void_p]
+        windll.user32.OpenClipboard.argtypes = [c_void_p]
+        windll.user32.SetClipboardData.argtypes = [c_uint, c_void_p]
+        windll.user32.SetClipboardData.restype = c_void_p
+
         hData = windll.kernel32.GlobalAlloc(GHND | GMEM_SHARE, len(data))
+        if not hData:
+            raise RuntimeError("Could not allocate clipboard memory")
+
         pData = windll.kernel32.GlobalLock(hData)
+        if not pData:
+            raise RuntimeError("Could not lock clipboard memory")
+
         memmove(pData, data, len(data))
         windll.kernel32.GlobalUnlock(hData)
 
-        if windll.user32.OpenClipboard(None):
+        if not windll.user32.OpenClipboard(None):
+            raise RuntimeError("Could not open clipboard")
+
+        try:
             windll.user32.EmptyClipboard()
-            windll.user32.SetClipboardData(CF_DIB, hData)
+            if not windll.user32.SetClipboardData(CF_DIB, hData):
+                raise RuntimeError("Could not set image on clipboard")
+        finally:
             windll.user32.CloseClipboard()
+
         safe_sleep(1, stop_event)
+        return True, None
     except Exception as e:
         try:
             # Fallback 1: Try with win32clipboard if pywin32 is installed
@@ -432,14 +639,9 @@ def copy_image(image_file, stop_event):
             win32clipboard.SetClipboardData(win32clipboard.CF_DIB, data)
             win32clipboard.CloseClipboard()
             safe_sleep(1, stop_event)
+            return True, None
         except Exception as win32_e:
-            # Fallback 2: Visual Copy/Paste via Default Photos App
-            os.startfile(image_file)
-            safe_sleep(2, stop_event)
-            pyautogui.hotkey("ctrl", "c")
-            safe_sleep(1, stop_event)
-            pyautogui.hotkey("alt", "f4")
-            safe_sleep(1, stop_event)
+            return False, f"Image clipboard copy failed: {e}; fallback failed: {win32_e}"
 
 
 def close_whatsapp(stop_event=None):
@@ -544,6 +746,7 @@ def run_automation(settings, stop_event, log, stats):
                 try:
                     os.startfile(f"whatsapp://send?phone={COUNTRY_CODE}{phone}")
                     opened_via_protocol = True
+                    log("WhatsApp open command sent. Waiting for chat screen...")
                     safe_sleep(5, stop_event)
                 except Exception as exc:
                     log(f"Could not open via whatsapp:// protocol: {exc}. Trying manual search fallback...")
@@ -576,6 +779,7 @@ def run_automation(settings, stop_event, log, stats):
                     stop_event,
                     log,
                 )
+                log(f"Chat check result for {phone}: {chat_status}")
 
                 if chat_status == "stopped":
                     log("Stopped by user.")
@@ -604,17 +808,27 @@ def run_automation(settings, stop_event, log, stats):
                     close_whatsapp(stop_event)
                     continue
 
-                copy_image(settings.image_file, stop_event)
+                log("Focusing WhatsApp message box...")
+                if not wait_and_focus_whatsapp_input(CHAT_READY_PHRASES, log, stop_event):
+                    raise RuntimeError("Could not focus WhatsApp message box")
 
+                log("Copying image to clipboard...")
+                image_copied, image_error = copy_image(settings.image_file, stop_event)
+                if not image_copied:
+                    raise RuntimeError(image_error or "Could not copy image to clipboard")
+
+                log("Pasting image...")
+                activate_whatsapp_window(log)
+                wait_and_focus_whatsapp_input(CHAT_READY_PHRASES, log, stop_event)
                 pyautogui.hotkey("ctrl", "v")
                 safe_sleep(IMAGE_PASTE_WAIT, stop_event)
 
-                pyperclip.copy(settings.message)
-                safe_sleep(1, stop_event)
-
-                pyautogui.hotkey("ctrl", "v")
+                log("Pasting message text...")
+                if not paste_text_into_media_caption(settings.message, log, stop_event):
+                    raise RuntimeError("Could not focus WhatsApp image caption box")
                 safe_sleep(MESSAGE_PASTE_WAIT, stop_event)
 
+                log("Pressing send...")
                 baseline_status_count = len(delivery_statuses(read_whatsapp_texts()))
                 pyautogui.press("enter")
                 sent_count += 1
